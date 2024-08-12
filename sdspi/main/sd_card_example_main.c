@@ -24,19 +24,23 @@
 #include "driver/uart.h"
 #include "string.h"
 #include "driver/gpio.h"
+#include <dirent.h>
 
 #define EXAMPLE_MAX_CHAR_SIZE    512
 
 static const char *TAG = "SDLOGGER";
 
 #define MOUNT_POINT "/sdcard"
+static const char *FILE_PREFIX = "UART1_log_";
+
+static int file_counter = 0;
 
 static const int RX_BUF_SIZE = 1024;
 
 #define TXD_PIN (GPIO_NUM_4)
 #define RXD_PIN (GPIO_NUM_5)
 
-#define FILE_SIZE_LIMIT (50 * 1024 * 1024)  // 50MB in bytes
+#define FILE_SIZE_LIMIT (30 * 1024 * 1024)  // 30MB in bytes
 
 #ifdef CONFIG_EXAMPLE_DEBUG_PIN_CONNECTIONS
 const char* names[] = {"CLK ", "MOSI", "MISO", "CS  "};
@@ -104,6 +108,33 @@ esp_err_t uart_init(void)
 
     ESP_LOGI(TAG, "UART initialized successfully");
     return ESP_OK;
+}
+
+int get_latest_file_number() {
+    DIR *dir;
+    struct dirent *ent;
+    int max_number = -1;
+    char full_path[64];
+
+    snprintf(full_path, sizeof(full_path), MOUNT_POINT);
+    dir = opendir(full_path);
+    if (dir == NULL) {
+        printf("Failed to open directory\n");
+        return -1;
+    }
+
+    while ((ent = readdir(dir)) != NULL) {
+        if (strncmp(ent->d_name, FILE_PREFIX, strlen(FILE_PREFIX)) == 0) {
+            int file_num;
+            if (sscanf(ent->d_name + strlen(FILE_PREFIX), "%d", &file_num) == 1) {
+                if (file_num > max_number) {
+                    max_number = file_num;
+                }
+            }
+        }
+    }
+    closedir(dir);
+    return max_number;
 }
 
 void app_main(void)
@@ -203,14 +234,33 @@ void app_main(void)
     // xTaskCreate(rx_task, "uart_rx_task", 1024 * 2, NULL, configMAX_PRIORITIES - 1, NULL);
 
     // Use POSIX and C standard library functions to work with files.
+    int latest_file_num = get_latest_file_number();
+    if (latest_file_num >= 0) {
+        file_counter = latest_file_num;
+        printf("Resuming from file number: %d\n", file_counter);
+    }
+    
+    size_t current_file_size = 0;
+    char filename[64];
+    
+    snprintf(filename, sizeof(filename), MOUNT_POINT "/%s%03d.txt", FILE_PREFIX, file_counter);
 
-    // First create a file.
+    // Seek the newest file.
     uint8_t* rx_data = (uint8_t*) malloc(RX_BUF_SIZE);
-    FILE* f = fopen(MOUNT_POINT "/log.txt", "a");
+    FILE* f = fopen(filename, "r");
+    if (f != NULL){
+        fseek(f, 0, SEEK_END);
+        current_file_size = ftell(f);
+        fclose(f);
+    } else {
+        current_file_size = 0;
+    }
+    f = fopen(filename, "a");
     if (f == NULL) {
         free(rx_data);
         restart_device("Failed to open file for appending\n");
     }
+    ESP_LOGI(TAG, "Opened file: %s (size: %zu bytes)\n", filename, current_file_size);
 
     while (1){
         // Read data from UART
@@ -218,13 +268,33 @@ void app_main(void)
         
         if (len > 0) {
             // Write data to file
-            fwrite(rx_data, 1, len, f);
+            size_t bytes_written = fwrite(rx_data, 1, len, f);
+            current_file_size += bytes_written;
             // Flush the file to ensure data is written
             fflush(f);
             fsync(fileno(f));
             
             // Optional: Print to console what was received
             ESP_LOGI(TAG, "Received and appended %d bytes\r\n", len);
+        }
+
+        
+        if (current_file_size >= FILE_SIZE_LIMIT) {
+            if (fclose(f) != 0) {
+                ESP_LOGE(TAG, "Failed to close file");
+                free(rx_data);
+                restart_device("File close failed");
+            }
+            file_counter++;
+            snprintf(filename, sizeof(filename), MOUNT_POINT "/%s%03d.txt", FILE_PREFIX, file_counter);
+            f = fopen(filename, "a");
+            if (f == NULL) {
+                ESP_LOGE(TAG, "Failed to open new file: %s", filename);
+                free(rx_data);
+                restart_device("New file open failed");
+            }
+            current_file_size = 0;
+            ESP_LOGI(TAG, "Created new file: %s", filename);
         }
 
         // Small delay to prevent tight looping
