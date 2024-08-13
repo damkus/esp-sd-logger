@@ -119,7 +119,7 @@ int get_latest_file_number() {
     snprintf(full_path, sizeof(full_path), MOUNT_POINT);
     dir = opendir(full_path);
     if (dir == NULL) {
-        printf("Failed to open directory\n");
+        ESP_LOGI(TAG, "Failed to open directory\n");
         return -1;
     }
 
@@ -237,7 +237,7 @@ void app_main(void)
     int latest_file_num = get_latest_file_number();
     if (latest_file_num >= 0) {
         file_counter = latest_file_num;
-        printf("Resuming from file number: %d\n", file_counter);
+        ESP_LOGI(TAG, "Resuming from file number: %d\n", file_counter);
     }
     
     size_t current_file_size = 0;
